@@ -1,0 +1,20 @@
+[project]
+name = "sqlagent"
+version = "0.1.0"
+description = "agent with sql db as rag containing geforce gaming information as custom mcp server"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [ 
+    "mcp>=1.7.0",
+    "openai",
+    "langchain-nvidia-ai-endpoints",
+    "langchain",
+    "langchain-core",
+    ]
+
+[build-system]
+requires = [ "hatchling",]
+build-backend = "hatchling.build"
+
+[project.scripts]
+sqlagent = "sqlagent:main"

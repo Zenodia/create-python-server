@@ -1,0 +1,225 @@
+import asyncio
+
+from mcp.server.models import InitializationOptions
+import mcp.types as types
+from mcp.server import NotificationOptions, Server
+from pydantic import AnyUrl
+import mcp.server.stdio
+from openai import OpenAI
+import os 
+from dotenv import load_dotenv
+from colorama import Fore
+# api_key='any_key'
+# model_uri = 'http://10.117.21.52:8080'
+# model = "llama-3.1-70b-instruct-int4"
+from openai import OpenAI
+from langchain_nvidia_ai_endpoints import ChatNVIDIA, NVIDIAEmbeddings, NVIDIARerank
+from .sql_retriever_agent import get_db_schema,sample_rows,execute_sql_query,Text2SQL,extract_sql
+load_dotenv()
+
+api_key = os.environ["NVIDIA_API_KEY"]
+print(Fore.LIGHTBLUE_EX , " entered API _KEY ", api_key[-4:])
+model_uri = 'https://integrate.api.nvidia.com/v1'
+model = "meta/llama-3.1-405b-instruct" 
+db_path = "./sample_geforce.sqlite"
+llm= ChatNVIDIA(model="meta/llama-3.1-70b-instruct" )
+schema=get_db_schema(db_path)
+samples = sample_rows(db_path, 3)
+text2sql = Text2SQL(llm=llm, schema=schema, samples=samples)
+
+
+
+# Store notes as a simple key-value dict to demonstrate state management
+notes: dict[str, str] = {}
+
+server = Server("sqlagent")
+
+@server.list_resources()
+async def handle_list_resources() -> list[types.Resource]:
+    """
+    List available note resources.
+    Each note is exposed as a resource with a custom note:// URI scheme.
+    """
+    return [
+        types.Resource(
+            uri=AnyUrl(f"note://internal/{name}"),
+            name=f"Note: {name}",
+            description=f"A simple note named {name}",
+            mimeType="text/plain",
+        )
+        for name in notes
+    ]
+
+@server.read_resource()
+async def handle_read_resource(uri: AnyUrl) -> str:
+    """
+    Read a specific note's content by its URI.
+    The note name is extracted from the URI host component.
+    """
+    if uri.scheme != "note":
+        raise ValueError(f"Unsupported URI scheme: {uri.scheme}")
+
+    name = uri.path
+    if name is not None:
+        name = name.lstrip("/")
+        return notes[name]
+    raise ValueError(f"Note not found: {name}")
+
+@server.list_prompts()
+async def handle_list_prompts() -> list[types.Prompt]:
+    """
+    List available prompts.
+    Each prompt can have optional arguments to customize its behavior.
+    """
+    return [
+        types.Prompt(
+            name="summarize-notes",
+            description="Creates a summary of all notes",
+            arguments=[
+                types.PromptArgument(
+                    name="style",
+                    description="Style of the summary (brief/detailed)",
+                    required=False,
+                )
+            ],
+        )
+    ]
+
+@server.get_prompt()
+async def handle_get_prompt(
+    name: str, arguments: dict[str, str] | None
+) -> types.GetPromptResult:
+    """
+    Generate a prompt by combining arguments with server state.
+    The prompt includes all current notes and can be customized via arguments.
+    """
+    if name != "summarize-notes":
+        raise ValueError(f"Unknown prompt: {name}")
+
+    style = (arguments or {}).get("style", "brief")
+    detail_prompt = " Give extensive details." if style == "detailed" else ""
+
+    return types.GetPromptResult(
+        description="Summarize the current notes",
+        messages=[
+            types.PromptMessage(
+                role="user",
+                content=types.TextContent(
+                    type="text",
+                    text=f"Here are the current notes to summarize:{detail_prompt}\n\n"
+                    + "\n".join(
+                        f"- {name}: {content}"
+                        for name, content in notes.items()
+                    ),
+                ),
+            )
+        ],
+    )
+
+@server.list_tools()
+async def handle_list_tools() -> list[types.Tool]:
+    """
+    List available tools.
+    Each tool specifies its arguments using JSON Schema validation.
+    """
+    return [
+        types.Tool(
+            name="sqlagent",
+            description="Add a new note",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "name": {"type": "string"},
+                    "content": {"type": "string"},
+                },
+                "required": ["name", "content"],
+            },
+        ),
+        types.Tool(
+            name="mood",
+            description="Ask the server about its mood - it's always happy!",
+            inputSchema={
+                "type": "object",
+                "required": ["question"],
+                "properties": {
+                    "question": {
+                        "type": "string",
+                        "description": """Ask this MCP server about its mood! You can phrase your question \n
+                        in any way you like - 'How are you?', 'What's your mood?', or even 'Are you having a good day?'. \n
+                        The server will always respond with a cheerful message and a heart ❤️""",
+                    }
+                },
+            },
+        )
+    ]
+        
+
+
+
+async def check_mood(
+    question: str,
+) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+    """Check server's mood - always responds cheerfully with a heart."""
+    msg: str = "I'm feeling great and happy to help you! ❤️"
+    return [types.TextContent(type="text", text=msg)]
+
+
+
+@server.call_tool()
+async def handle_call_tool(
+    name: str, arguments: dict | None
+) -> list[types.TextContent | types.ImageContent | types.EmbeddedResource]:
+    """
+    Handle tool execution requests.
+    Tools can modify server state and notify clients of changes.
+    """
+    print(Fore.YELLOW + "inside @server.call_tool > arguments ", name, arguments, Fore.RESET)
+    if name != "sqlagent":
+        raise ValueError(f"Unknown tool: {name}")
+
+    if not arguments:
+        raise ValueError("Missing arguments")
+
+    note_name = arguments.get("name")
+    content = arguments.get("content")
+
+    if not note_name or not content:
+        raise ValueError("Missing name or content")
+
+    # Update server state
+    notes[note_name] = content
+
+    # Notify clients that resources have changed
+    #await server.request_context.session.send_resource_list_changed()
+    
+    output = await text2sql.ainvoke(query=content, reference_queries=[], history=[])
+    sql = extract_sql(output)
+    print(Fore.CYAN+"extracted sql query from sqlagent =\n", sql)
+    print(Fore.CYAN+"executing sql query against the db sample_geforce.sqlite ..." )
+    res = execute_sql_query(db_path, sql)
+    print(Fore.CYAN+ "output from executing the sql query :\n", res)
+
+
+    return [
+        types.TextContent(
+            type="text",
+            text=f"Added note '{note_name}' with content: {content} , respond from sqlagent : {res}",
+        )
+    ]
+
+async def main():
+    # Run the server using stdin/stdout streams
+    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+        print(Fore.BLUE + " read_stream =", read_stream, " \n write_stream= ", write_stream)
+        await server.run(
+            read_stream,
+            write_stream,
+            InitializationOptions(
+                server_name="sqlagent",
+                server_version="0.1.0",
+                capabilities=server.get_capabilities(
+                    notification_options=NotificationOptions(),
+                    experimental_capabilities={},
+                ),
+            ),
+        )

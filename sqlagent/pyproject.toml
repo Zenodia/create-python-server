@@ -10,6 +10,8 @@ dependencies = [
     "langchain-nvidia-ai-endpoints",
     "langchain",
     "langchain-core",
+    "colorama",
+    "mcp>=1.4.1",
     ]
 
 [build-system]

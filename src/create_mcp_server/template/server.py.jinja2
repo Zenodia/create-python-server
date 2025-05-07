@@ -101,7 +101,7 @@ async def handle_list_tools() -> list[types.Tool]:
     """
     return [
         types.Tool(
-            name="add-note",
+            name="sqlagent",
             description="Add a new note",
             inputSchema={
                 "type": "object",
@@ -122,7 +122,7 @@ async def handle_call_tool(
     Handle tool execution requests.
     Tools can modify server state and notify clients of changes.
     """
-    if name != "add-note":
+    if name != "sqlagent":
         raise ValueError(f"Unknown tool: {name}")
 
     if not arguments:
